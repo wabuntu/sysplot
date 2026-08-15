@@ -58,20 +58,13 @@ impl View {
     }
 }
 
-/// What slice of the timeline a Metric screen is showing: a whole calendar
-/// day, or one hour drilled into from that day.
+/// What slice of the timeline a Metric screen is showing: every loaded
+/// sample, a single calendar day, or one hour drilled into from a day.
 #[derive(Clone, Debug)]
 enum Scope {
+    All,
     Day(String),
     Hour(String, String),
-}
-
-impl Scope {
-    fn date(&self) -> &str {
-        match self {
-            Scope::Day(d) | Scope::Hour(d, _) => d,
-        }
-    }
 }
 
 struct MetricState {
@@ -110,17 +103,26 @@ impl App {
         days.dedup();
         days.reverse();
 
-        let mut state = ListState::default();
-        if !days.is_empty() {
-            state.select(Some(0));
-        }
+        let screen = Screen::Metric(overview_metric_state(&samples));
 
         App {
             nodename,
             samples,
             days,
-            screen: Screen::DayList { state },
+            screen,
         }
+    }
+
+    fn open_day_list(&mut self) {
+        let mut state = ListState::default();
+        if !self.days.is_empty() {
+            state.select(Some(0));
+        }
+        self.screen = Screen::DayList { state };
+    }
+
+    fn back_to_overview(&mut self) {
+        self.screen = Screen::Metric(overview_metric_state(&self.samples));
     }
 
     fn enter_day(&mut self, date: String) {
@@ -181,6 +183,7 @@ impl App {
 
 fn filter_samples<'a>(samples: &'a [Sample], scope: &Scope) -> Vec<&'a Sample> {
     match scope {
+        Scope::All => samples.iter().collect(),
         Scope::Day(date) => samples
             .iter()
             .filter(|s| &s.timestamp.date == date)
@@ -189,6 +192,19 @@ fn filter_samples<'a>(samples: &'a [Sample], scope: &Scope) -> Vec<&'a Sample> {
             .iter()
             .filter(|s| &s.timestamp.date == date && s.timestamp.time.starts_with(hour.as_str()))
             .collect(),
+    }
+}
+
+fn overview_metric_state(samples: &[Sample]) -> MetricState {
+    let filtered: Vec<&Sample> = samples.iter().collect();
+    let (disk_devices, net_ifaces) = device_lists(&filtered);
+    MetricState {
+        scope: Scope::All,
+        view: View::Cpu,
+        disk_devices,
+        disk_idx: 0,
+        net_ifaces,
+        net_idx: 0,
     }
 }
 
@@ -257,51 +273,72 @@ fn move_selection(state: &mut ListState, len: usize, forward: bool) {
     state.select(Some(next));
 }
 
-fn cpu_series(samples: &[&Sample]) -> Vec<(f64, f64)> {
+/// The value a sample contributes to the currently selected view, or None if
+/// that sample has nothing for it (e.g. a disk device that only appears on
+/// some days).
+fn metric_value(s: &Sample, view: View, disk_name: &str, net_name: &str) -> Option<f64> {
+    match view {
+        View::Cpu => s
+            .cpu_load
+            .iter()
+            .find(|c| c.cpu == "all")
+            .map(|c| 100.0 - c.idle),
+        View::Memory => s.memory.as_ref().map(|m| m.memused_percent),
+        View::Disk => s
+            .disk
+            .iter()
+            .find(|d| d.disk_device == disk_name)
+            .map(|d| d.util_percent),
+        View::Network => s
+            .network
+            .as_ref()
+            .and_then(|n| n.net_dev.iter().find(|d| d.iface == net_name))
+            .map(|d| d.rx_kb + d.tx_kb),
+    }
+}
+
+/// Raw per-sample series, one point per sample in order (used by the Day and
+/// Hour views, where every sample is already the finest resolution there is).
+fn series(samples: &[&Sample], view: View, disk_name: &str, net_name: &str) -> Vec<(f64, f64)> {
     samples
         .iter()
         .enumerate()
-        .filter_map(|(i, s)| {
-            s.cpu_load
-                .iter()
-                .find(|c| c.cpu == "all")
-                .map(|c| (i as f64, 100.0 - c.idle))
-        })
+        .filter_map(|(i, s)| metric_value(s, view, disk_name, net_name).map(|v| (i as f64, v)))
         .collect()
 }
 
-fn memory_series(samples: &[&Sample]) -> Vec<(f64, f64)> {
-    samples
-        .iter()
-        .enumerate()
-        .filter_map(|(i, s)| s.memory.as_ref().map(|m| (i as f64, m.memused_percent)))
-        .collect()
-}
+type MaxAvgMinSeries = (Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<(f64, f64)>);
 
-fn disk_series(samples: &[&Sample], device: &str) -> Vec<(f64, f64)> {
-    samples
-        .iter()
-        .enumerate()
-        .filter_map(|(i, s)| {
-            s.disk
-                .iter()
-                .find(|d| d.disk_device == device)
-                .map(|d| (i as f64, d.util_percent))
-        })
-        .collect()
-}
-
-fn network_series(samples: &[&Sample], iface: &str) -> Vec<(f64, f64)> {
-    samples
-        .iter()
-        .enumerate()
-        .filter_map(|(i, s)| {
-            s.network
-                .as_ref()
-                .and_then(|n| n.net_dev.iter().find(|d| d.iface == iface))
-                .map(|d| (i as f64, d.rx_kb + d.tx_kb))
-        })
-        .collect()
+/// Per-day max/average/min series, one point per day in `days_chronological`
+/// (oldest first, for a left-to-right timeline). Used by the Overview, which
+/// would otherwise have to cram thousands of raw samples onto one chart.
+fn daily_series(
+    samples: &[Sample],
+    days_chronological: &[String],
+    view: View,
+    disk_name: &str,
+    net_name: &str,
+) -> MaxAvgMinSeries {
+    let mut max_series = Vec::new();
+    let mut avg_series = Vec::new();
+    let mut min_series = Vec::new();
+    for (i, day) in days_chronological.iter().enumerate() {
+        let values: Vec<f64> = samples
+            .iter()
+            .filter(|s| &s.timestamp.date == day)
+            .filter_map(|s| metric_value(s, view, disk_name, net_name))
+            .collect();
+        if values.is_empty() {
+            continue;
+        }
+        let max = values.iter().copied().fold(f64::MIN, f64::max);
+        let min = values.iter().copied().fold(f64::MAX, f64::min);
+        let avg = values.iter().sum::<f64>() / values.len() as f64;
+        max_series.push((i as f64, max));
+        avg_series.push((i as f64, avg));
+        min_series.push((i as f64, min));
+    }
+    (max_series, avg_series, min_series)
 }
 
 /// "HH:MM", or "MM-DD HH:MM" once the sample's date has moved past
@@ -329,6 +366,16 @@ fn time_label(samples: &[&Sample], idx: usize, base_date: &str) -> String {
             );
         format!("{} {}", month_day, time)
     }
+}
+
+/// Date label ("MM-DD") for the Overview's per-day x-axis.
+fn date_label(days_chronological: &[String], idx: usize) -> String {
+    let Some(date) = days_chronological.get(idx) else {
+        return String::new();
+    };
+    date.split_once('-')
+        .and_then(|(_year, rest)| rest.split_once('-'))
+        .map_or_else(|| date.clone(), |(m, d)| format!("{}-{}", m, d))
 }
 
 fn main() {
@@ -390,6 +437,7 @@ fn handle_key(app: &mut App, code: KeyCode) {
                     app.enter_day(date);
                 }
             }
+            KeyCode::Esc => app.back_to_overview(),
             _ => {}
         },
         Screen::Metric(m) => match code {
@@ -397,13 +445,16 @@ fn handle_key(app: &mut App, code: KeyCode) {
             KeyCode::Left | KeyCode::BackTab => m.view = m.view.prev(),
             KeyCode::Down => cycle_metric_selection(m, true),
             KeyCode::Up => cycle_metric_selection(m, false),
-            KeyCode::Enter => {
-                if let Scope::Day(date) = &m.scope {
+            KeyCode::Enter => match &m.scope {
+                Scope::All => app.open_day_list(),
+                Scope::Day(date) => {
                     let date = date.clone();
                     app.open_hour_list(date);
                 }
-            }
+                Scope::Hour(..) => {}
+            },
             KeyCode::Esc => match m.scope.clone() {
+                Scope::All => {}
                 Scope::Day(date) => app.back_to_day_list(&date),
                 Scope::Hour(date, hour) => app.back_to_hour_list(date, &hour),
             },
@@ -430,13 +481,14 @@ fn handle_key(app: &mut App, code: KeyCode) {
 fn draw(frame: &mut Frame, app: &mut App) {
     let nodename = app.nodename.clone();
     let days = app.days.clone();
+    let days_chronological: Vec<String> = days.iter().rev().cloned().collect();
     let samples = &app.samples;
     match &mut app.screen {
         Screen::DayList { state } => draw_day_list(frame, &nodename, &days, samples, state),
         Screen::HourList { date, hours, state } => draw_hour_list(frame, date, hours, state),
         Screen::Metric(m) => {
             let filtered = filter_samples(samples, &m.scope);
-            draw_metric(frame, &nodename, m, &filtered);
+            draw_metric(frame, &nodename, m, samples, &filtered, &days_chronological);
         }
     }
 }
@@ -503,7 +555,14 @@ fn draw_hour_list(frame: &mut Frame, date: &str, hours: &[String], state: &mut L
     frame.render_stateful_widget(list, layout[1], state);
 }
 
-fn draw_metric(frame: &mut Frame, nodename: &str, m: &MetricState, samples: &[&Sample]) {
+fn draw_metric(
+    frame: &mut Frame,
+    nodename: &str,
+    m: &MetricState,
+    all_samples: &[Sample],
+    filtered: &[&Sample],
+    days_chronological: &[String],
+) {
     let layout = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(frame.area());
 
     let tabs: Vec<String> = View::ALL
@@ -518,6 +577,7 @@ fn draw_metric(frame: &mut Frame, nodename: &str, m: &MetricState, samples: &[&S
         .collect();
 
     let scope_label = match &m.scope {
+        Scope::All => format!("last {} day(s)", days_chronological.len()),
         Scope::Day(date) => date.clone(),
         Scope::Hour(date, hour) => format!("{} {}:00", date, hour),
     };
@@ -535,73 +595,138 @@ fn draw_metric(frame: &mut Frame, nodename: &str, m: &MetricState, samples: &[&S
         View::Cpu | View::Memory => String::new(),
     };
     let drill_hint = match m.scope {
+        Scope::All => "Enter: days, ",
         Scope::Day(_) => "Enter: hour view, ",
         Scope::Hour(..) => "",
     };
+    let back_hint = match m.scope {
+        Scope::All => "",
+        Scope::Day(_) | Scope::Hour(..) => "Esc: back, ",
+    };
 
     let header = format!(
-        "{} — {} ({})   {}   {}Esc: back, ←/→: switch, ↑/↓: select, q: quit",
+        "{} — {} ({})   {}   {}{}←/→: switch, ↑/↓: select, q: quit",
         nodename,
         scope_label,
         tabs.join(" "),
         selection,
-        drill_hint
+        drill_hint,
+        back_hint
     );
     frame.render_widget(Line::from(header), layout[0]);
 
     let disk_name = m.disk_devices.get(m.disk_idx).map_or("", String::as_str);
     let net_name = m.net_ifaces.get(m.net_idx).map_or("", String::as_str);
-    let (data, y_max, y_unit) = match m.view {
-        View::Cpu => (cpu_series(samples), 100.0, "%"),
-        View::Memory => (memory_series(samples), 100.0, "%"),
-        View::Disk => (disk_series(samples, disk_name), 100.0, "%"),
-        View::Network => {
-            let series = network_series(samples, net_name);
-            let max = series
-                .iter()
-                .map(|(_, y)| *y)
-                .fold(0.0_f64, f64::max)
-                .max(1.0);
-            (series, max, "kB/s")
+    let y_unit = if m.view == View::Network { "kB/s" } else { "%" };
+
+    match &m.scope {
+        Scope::All => {
+            let (max_s, avg_s, min_s) =
+                daily_series(all_samples, days_chronological, m.view, disk_name, net_name);
+            if avg_s.is_empty() {
+                frame.render_widget(
+                    Paragraph::new("No data for this view").block(Block::bordered()),
+                    layout[1],
+                );
+                return;
+            }
+
+            let y_max = if m.view == View::Network {
+                [&max_s, &avg_s, &min_s]
+                    .iter()
+                    .flat_map(|s| s.iter().map(|(_, y)| *y))
+                    .fold(0.0_f64, f64::max)
+                    .max(1.0)
+            } else {
+                100.0
+            };
+
+            let n = days_chronological.len().max(1);
+            let x_bounds = [0.0, (n - 1) as f64];
+            let mid = (n - 1) / 2;
+
+            let datasets = vec![
+                Dataset::default()
+                    .name("max")
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().yellow())
+                    .data(&max_s),
+                Dataset::default()
+                    .name("avg")
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().cyan())
+                    .data(&avg_s),
+                Dataset::default()
+                    .name("min")
+                    .graph_type(GraphType::Line)
+                    .style(Style::default().blue())
+                    .data(&min_s),
+            ];
+
+            let x_axis = Axis::default().bounds(x_bounds).labels([
+                date_label(days_chronological, 0),
+                date_label(days_chronological, mid),
+                date_label(days_chronological, n - 1),
+            ]);
+            let y_axis = Axis::default().title(y_unit).bounds([0.0, y_max]).labels([
+                "0".to_string(),
+                format!("{:.0}", y_max / 2.0),
+                format!("{:.0}", y_max),
+            ]);
+
+            let chart = Chart::new(datasets)
+                .block(Block::bordered().title(m.view.title()))
+                .x_axis(x_axis)
+                .y_axis(y_axis);
+            frame.render_widget(chart, layout[1]);
         }
-    };
+        Scope::Day(date) | Scope::Hour(date, _) => {
+            let data = series(filtered, m.view, disk_name, net_name);
+            if data.is_empty() {
+                frame.render_widget(
+                    Paragraph::new("No data for this view").block(Block::bordered()),
+                    layout[1],
+                );
+                return;
+            }
 
-    if data.is_empty() {
-        frame.render_widget(
-            Paragraph::new("No data for this view").block(Block::bordered()),
-            layout[1],
-        );
-        return;
+            let y_max = if m.view == View::Network {
+                data.iter()
+                    .map(|(_, y)| *y)
+                    .fold(0.0_f64, f64::max)
+                    .max(1.0)
+            } else {
+                100.0
+            };
+
+            let n = filtered.len().max(1);
+            let x_bounds = [0.0, (n - 1) as f64];
+            let mid = (n - 1) / 2;
+
+            let dataset = Dataset::default()
+                .name(m.view.title())
+                .graph_type(GraphType::Line)
+                .style(Style::default().cyan())
+                .data(&data);
+
+            let x_axis = Axis::default().bounds(x_bounds).labels([
+                time_label(filtered, 0, date),
+                time_label(filtered, mid, date),
+                time_label(filtered, n - 1, date),
+            ]);
+            let y_axis = Axis::default().title(y_unit).bounds([0.0, y_max]).labels([
+                "0".to_string(),
+                format!("{:.0}", y_max / 2.0),
+                format!("{:.0}", y_max),
+            ]);
+
+            let chart = Chart::new(vec![dataset])
+                .block(Block::bordered().title(m.view.title()))
+                .x_axis(x_axis)
+                .y_axis(y_axis);
+            frame.render_widget(chart, layout[1]);
+        }
     }
-
-    let n = samples.len().max(1);
-    let x_bounds = [0.0, (n - 1) as f64];
-    let mid = (n - 1) / 2;
-    let base_date = m.scope.date();
-
-    let dataset = Dataset::default()
-        .name(m.view.title())
-        .graph_type(GraphType::Line)
-        .style(Style::default().cyan())
-        .data(&data);
-
-    let x_axis = Axis::default().bounds(x_bounds).labels([
-        time_label(samples, 0, base_date),
-        time_label(samples, mid, base_date),
-        time_label(samples, n - 1, base_date),
-    ]);
-
-    let y_axis = Axis::default().title(y_unit).bounds([0.0, y_max]).labels([
-        "0".to_string(),
-        format!("{:.0}", y_max / 2.0),
-        format!("{:.0}", y_max),
-    ]);
-
-    let chart = Chart::new(vec![dataset])
-        .block(Block::bordered().title(m.view.title()))
-        .x_axis(x_axis)
-        .y_axis(y_axis);
-    frame.render_widget(chart, layout[1]);
 }
 
 #[cfg(test)]
@@ -626,6 +751,42 @@ mod tests {
                 .collect(),
             network: None,
         }
+    }
+
+    fn cpu_sample(date: &str, time: &str, usage_percent: f64) -> Sample {
+        let mut s = sample(date, time, vec![]);
+        s.cpu_load.push(sadf::CpuLoad {
+            cpu: "all".to_string(),
+            idle: 100.0 - usage_percent,
+        });
+        s
+    }
+
+    #[test]
+    fn app_starts_on_the_overview_with_all_samples() {
+        let samples = vec![
+            sample("2026-08-01", "10:00:00", vec![]),
+            sample("2026-08-02", "10:00:00", vec![]),
+        ];
+        let app = App::new("host".to_string(), samples);
+        match app.screen {
+            Screen::Metric(ref m) => assert!(matches!(m.scope, Scope::All)),
+            _ => panic!("expected the app to start on the Overview (Scope::All)"),
+        }
+    }
+
+    #[test]
+    fn daily_series_computes_max_average_min_per_day() {
+        let samples = vec![
+            cpu_sample("2026-08-01", "10:00:00", 10.0),
+            cpu_sample("2026-08-01", "11:00:00", 30.0),
+            cpu_sample("2026-08-02", "10:00:00", 50.0),
+        ];
+        let days = vec!["2026-08-01".to_string(), "2026-08-02".to_string()];
+        let (max_s, avg_s, min_s) = daily_series(&samples, &days, View::Cpu, "", "");
+        assert_eq!(max_s, vec![(0.0, 30.0), (1.0, 50.0)]);
+        assert_eq!(avg_s, vec![(0.0, 20.0), (1.0, 50.0)]);
+        assert_eq!(min_s, vec![(0.0, 10.0), (1.0, 50.0)]);
     }
 
     #[test]
