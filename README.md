@@ -1,10 +1,11 @@
 # sysplot
 
-TUI viewer for sysstat (`.sar`) files, powered by `sadf`.
+TUI viewer for sysstat (`.sar`) history, powered by `sadf`.
 
-Reads a `sysstat` binary data file (e.g. `/var/log/sysstat/sa15`) via
-`sadf -j -- -A` and renders CPU, memory, disk, and network activity as
-terminal graphs you can page through interactively.
+Reads every sysstat data file in a directory (e.g. `/var/log/sysstat`) via
+`sadf -j -- -A`, in parallel, and lets you browse the last 30 days of CPU,
+memory, disk, and network activity — drill from a day down to a single hour
+without leaving the terminal.
 
 ## Install
 
@@ -18,11 +19,24 @@ Requires `sysstat` to be installed (for `sadf`).
 ## Usage
 
 ```
-$ sysplot /var/log/sysstat/sa15
+$ sysplot                          # defaults to /var/log/sysstat
+$ sysplot /var/log/sysstat         # a directory of saXX/saYYYYMMDD files
+$ sysplot /var/log/sysstat/sa15    # a single file
 ```
 
-Keys:
+Navigation:
 
-- `←`/`→` (or Tab/Shift+Tab): switch between CPU / Memory / Disk / Network
-- `↑`/`↓`: cycle the selected disk device / network interface
-- `q` / `Esc`: quit
+1. **Days** — the last 30 days that have data, most recent first.
+2. **Day view** — `←`/`→` switches CPU / Memory / Disk / Network, `↑`/`↓`
+   cycles the selected disk device / network interface.
+3. **Hours** — press `Enter` from a day view to list the hours it has
+   samples for.
+4. **Hour view** — same CPU/Memory/Disk/Network controls, zoomed to that
+   hour's samples.
+
+`Esc` goes back one level, `q` quits from anywhere.
+
+Note: the finest resolution shown is whatever your sysstat collection
+interval actually is (commonly every 10 minutes) — drilling into an hour
+zooms into that hour's real samples, it doesn't invent per-minute data that
+was never collected.

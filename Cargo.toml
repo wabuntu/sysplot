@@ -8,7 +8,9 @@ homepage = "https://github.com/wabuntu"
 repository = "https://github.com/wabuntu/sysplot"
 documentation = "https://docs.rs/sysplot"
 description = """
-TUI viewer for sysstat (.sar) files, powered by sadf.
+TUI viewer for sysstat (.sar) history, powered by sadf. Browse the last
+30 days of CPU, memory, disk, and network activity and drill from a day
+down to a single hour.
 """
 
 [dependencies]
