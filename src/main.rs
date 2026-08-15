@@ -5,6 +5,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::Style;
+use ratatui::symbols;
 use ratatui::text::Line;
 use ratatui::widgets::{Axis, Block, Chart, Dataset, GraphType, List, ListState, Paragraph};
 use sadf::Sample;
@@ -74,12 +75,12 @@ struct MetricState {
     disk_idx: usize,
     net_ifaces: Vec<String>,
     net_idx: usize,
+    /// Index into `App::days` of the day highlighted on the Overview chart.
+    /// Meaningless outside `Scope::All`.
+    day_cursor: usize,
 }
 
 enum Screen {
-    DayList {
-        state: ListState,
-    },
     Metric(MetricState),
     HourList {
         date: String,
@@ -91,7 +92,8 @@ enum Screen {
 struct App {
     nodename: String,
     samples: Vec<Sample>,
-    /// Distinct calendar dates present in `samples`, most recent first.
+    /// Distinct calendar dates present in `samples`, oldest first (matches
+    /// the Overview chart's left-to-right x-axis).
     days: Vec<String>,
     screen: Screen,
 }
@@ -101,9 +103,9 @@ impl App {
         let mut days: Vec<String> = samples.iter().map(|s| s.timestamp.date.clone()).collect();
         days.sort();
         days.dedup();
-        days.reverse();
 
-        let screen = Screen::Metric(overview_metric_state(&samples));
+        let cursor = days.len().saturating_sub(1);
+        let screen = Screen::Metric(overview_metric_state(&samples, cursor));
 
         App {
             nodename,
@@ -113,16 +115,15 @@ impl App {
         }
     }
 
-    fn open_day_list(&mut self) {
-        let mut state = ListState::default();
-        if !self.days.is_empty() {
-            state.select(Some(0));
-        }
-        self.screen = Screen::DayList { state };
-    }
-
-    fn back_to_overview(&mut self) {
-        self.screen = Screen::Metric(overview_metric_state(&self.samples));
+    /// Back to the Overview, cursor parked on `date` (used when Esc-ing out
+    /// of a day view, so you land back where you drilled in from).
+    fn back_to_overview_at(&mut self, date: &str) {
+        let idx = self
+            .days
+            .iter()
+            .position(|d| d == date)
+            .unwrap_or(self.days.len().saturating_sub(1));
+        self.screen = Screen::Metric(overview_metric_state(&self.samples, idx));
     }
 
     fn enter_day(&mut self, date: String) {
@@ -135,6 +136,7 @@ impl App {
             disk_idx: 0,
             net_ifaces,
             net_idx: 0,
+            day_cursor: 0,
         });
     }
 
@@ -149,6 +151,7 @@ impl App {
             disk_idx: 0,
             net_ifaces,
             net_idx: 0,
+            day_cursor: 0,
         });
     }
 
@@ -170,15 +173,6 @@ impl App {
         }
         self.screen = Screen::HourList { date, hours, state };
     }
-
-    fn back_to_day_list(&mut self, date: &str) {
-        let idx = self.days.iter().position(|d| d == date).unwrap_or(0);
-        let mut state = ListState::default();
-        if !self.days.is_empty() {
-            state.select(Some(idx));
-        }
-        self.screen = Screen::DayList { state };
-    }
 }
 
 fn filter_samples<'a>(samples: &'a [Sample], scope: &Scope) -> Vec<&'a Sample> {
@@ -195,7 +189,7 @@ fn filter_samples<'a>(samples: &'a [Sample], scope: &Scope) -> Vec<&'a Sample> {
     }
 }
 
-fn overview_metric_state(samples: &[Sample]) -> MetricState {
+fn overview_metric_state(samples: &[Sample], day_cursor: usize) -> MetricState {
     let filtered: Vec<&Sample> = samples.iter().collect();
     let (disk_devices, net_ifaces) = device_lists(&filtered);
     MetricState {
@@ -205,6 +199,7 @@ fn overview_metric_state(samples: &[Sample]) -> MetricState {
         disk_idx: 0,
         net_ifaces,
         net_idx: 0,
+        day_cursor,
     }
 }
 
@@ -429,15 +424,21 @@ fn run(terminal: &mut ratatui::DefaultTerminal, app: &mut App) -> std::io::Resul
 
 fn handle_key(app: &mut App, code: KeyCode) {
     match &mut app.screen {
-        Screen::DayList { state } => match code {
-            KeyCode::Down => move_selection(state, app.days.len(), true),
-            KeyCode::Up => move_selection(state, app.days.len(), false),
+        Screen::Metric(m) if matches!(m.scope, Scope::All) => match code {
+            KeyCode::Tab => m.view = m.view.next(),
+            KeyCode::BackTab => m.view = m.view.prev(),
+            KeyCode::Right => {
+                let max = app.days.len().saturating_sub(1);
+                m.day_cursor = (m.day_cursor + 1).min(max);
+            }
+            KeyCode::Left => m.day_cursor = m.day_cursor.saturating_sub(1),
+            KeyCode::Down => cycle_metric_selection(m, true),
+            KeyCode::Up => cycle_metric_selection(m, false),
             KeyCode::Enter => {
-                if let Some(date) = state.selected().and_then(|i| app.days.get(i)).cloned() {
+                if let Some(date) = app.days.get(m.day_cursor).cloned() {
                     app.enter_day(date);
                 }
             }
-            KeyCode::Esc => app.back_to_overview(),
             _ => {}
         },
         Screen::Metric(m) => match code {
@@ -445,17 +446,15 @@ fn handle_key(app: &mut App, code: KeyCode) {
             KeyCode::Left | KeyCode::BackTab => m.view = m.view.prev(),
             KeyCode::Down => cycle_metric_selection(m, true),
             KeyCode::Up => cycle_metric_selection(m, false),
-            KeyCode::Enter => match &m.scope {
-                Scope::All => app.open_day_list(),
-                Scope::Day(date) => {
+            KeyCode::Enter => {
+                if let Scope::Day(date) = &m.scope {
                     let date = date.clone();
                     app.open_hour_list(date);
                 }
-                Scope::Hour(..) => {}
-            },
+            }
             KeyCode::Esc => match m.scope.clone() {
-                Scope::All => {}
-                Scope::Day(date) => app.back_to_day_list(&date),
+                Scope::All => unreachable!("handled by the Scope::All arm above"),
+                Scope::Day(date) => app.back_to_overview_at(&date),
                 Scope::Hour(date, hour) => app.back_to_hour_list(date, &hour),
             },
             _ => {}
@@ -481,54 +480,14 @@ fn handle_key(app: &mut App, code: KeyCode) {
 fn draw(frame: &mut Frame, app: &mut App) {
     let nodename = app.nodename.clone();
     let days = app.days.clone();
-    let days_chronological: Vec<String> = days.iter().rev().cloned().collect();
     let samples = &app.samples;
     match &mut app.screen {
-        Screen::DayList { state } => draw_day_list(frame, &nodename, &days, samples, state),
         Screen::HourList { date, hours, state } => draw_hour_list(frame, date, hours, state),
         Screen::Metric(m) => {
             let filtered = filter_samples(samples, &m.scope);
-            draw_metric(frame, &nodename, m, samples, &filtered, &days_chronological);
+            draw_metric(frame, &nodename, m, samples, &filtered, &days);
         }
     }
-}
-
-fn draw_day_list(
-    frame: &mut Frame,
-    nodename: &str,
-    days: &[String],
-    samples: &[Sample],
-    state: &mut ListState,
-) {
-    let layout = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(frame.area());
-    let header = format!(
-        "{} — {} day(s) of sysstat data   ↑/↓: select, Enter: open, q: quit",
-        nodename,
-        days.len()
-    );
-    frame.render_widget(Line::from(header), layout[0]);
-
-    if days.is_empty() {
-        frame.render_widget(
-            Paragraph::new("No sysstat data files found").block(Block::bordered()),
-            layout[1],
-        );
-        return;
-    }
-
-    let items: Vec<String> = days
-        .iter()
-        .map(|d| {
-            let n = samples.iter().filter(|s| &s.timestamp.date == d).count();
-            format!("{}   ({} samples)", d, n)
-        })
-        .collect();
-
-    let list = List::new(items)
-        .block(Block::bordered().title("Days"))
-        .highlight_style(Style::default().cyan().bold())
-        .highlight_symbol("> ");
-    frame.render_stateful_widget(list, layout[1], state);
 }
 
 fn draw_hour_list(frame: &mut Frame, date: &str, hours: &[String], state: &mut ListState) {
@@ -561,7 +520,7 @@ fn draw_metric(
     m: &MetricState,
     all_samples: &[Sample],
     filtered: &[&Sample],
-    days_chronological: &[String],
+    days: &[String],
 ) {
     let layout = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(frame.area());
 
@@ -577,7 +536,10 @@ fn draw_metric(
         .collect();
 
     let scope_label = match &m.scope {
-        Scope::All => format!("last {} day(s)", days_chronological.len()),
+        Scope::All => {
+            let selected = days.get(m.day_cursor).map_or("", String::as_str);
+            format!("{} of {} days — {}", m.day_cursor + 1, days.len(), selected)
+        }
         Scope::Day(date) => date.clone(),
         Scope::Hour(date, hour) => format!("{} {}:00", date, hour),
     };
@@ -594,24 +556,19 @@ fn draw_metric(
             .unwrap_or_else(|| "(no interfaces)".to_string()),
         View::Cpu | View::Memory => String::new(),
     };
-    let drill_hint = match m.scope {
-        Scope::All => "Enter: days, ",
-        Scope::Day(_) => "Enter: hour view, ",
-        Scope::Hour(..) => "",
-    };
-    let back_hint = match m.scope {
-        Scope::All => "",
-        Scope::Day(_) | Scope::Hour(..) => "Esc: back, ",
+    let nav_hint = match m.scope {
+        Scope::All => "←/→: day, Tab: view, ↑/↓: select, Enter: open day, ",
+        Scope::Day(_) => "←/→: view, ↑/↓: select, Enter: hour view, Esc: back, ",
+        Scope::Hour(..) => "←/→: view, ↑/↓: select, Esc: back, ",
     };
 
     let header = format!(
-        "{} — {} ({})   {}   {}{}←/→: switch, ↑/↓: select, q: quit",
+        "{} — {} ({})   {}   {}q: quit",
         nodename,
         scope_label,
         tabs.join(" "),
         selection,
-        drill_hint,
-        back_hint
+        nav_hint
     );
     frame.render_widget(Line::from(header), layout[0]);
 
@@ -622,7 +579,7 @@ fn draw_metric(
     match &m.scope {
         Scope::All => {
             let (max_s, avg_s, min_s) =
-                daily_series(all_samples, days_chronological, m.view, disk_name, net_name);
+                daily_series(all_samples, days, m.view, disk_name, net_name);
             if avg_s.is_empty() {
                 frame.render_widget(
                     Paragraph::new("No data for this view").block(Block::bordered()),
@@ -641,32 +598,48 @@ fn draw_metric(
                 100.0
             };
 
-            let n = days_chronological.len().max(1);
+            let n = days.len().max(1);
             let x_bounds = [0.0, (n - 1) as f64];
             let mid = (n - 1) / 2;
 
-            let datasets = vec![
+            let cursor_data: Vec<(f64, f64)> = avg_s
+                .iter()
+                .find(|(x, _)| *x as usize == m.day_cursor)
+                .copied()
+                .into_iter()
+                .collect();
+
+            let mut datasets = vec![
                 Dataset::default()
-                    .name("max")
+                    .name("High")
                     .graph_type(GraphType::Line)
-                    .style(Style::default().yellow())
+                    .style(Style::default().red())
                     .data(&max_s),
                 Dataset::default()
-                    .name("avg")
+                    .name("Avg")
                     .graph_type(GraphType::Line)
-                    .style(Style::default().cyan())
+                    .style(Style::default().yellow())
                     .data(&avg_s),
                 Dataset::default()
-                    .name("min")
+                    .name("Low")
                     .graph_type(GraphType::Line)
-                    .style(Style::default().blue())
+                    .style(Style::default().green())
                     .data(&min_s),
             ];
+            if !cursor_data.is_empty() {
+                datasets.push(
+                    Dataset::default()
+                        .name("selected")
+                        .marker(symbols::Marker::Block)
+                        .style(Style::default().white().bold())
+                        .data(&cursor_data),
+                );
+            }
 
             let x_axis = Axis::default().bounds(x_bounds).labels([
-                date_label(days_chronological, 0),
-                date_label(days_chronological, mid),
-                date_label(days_chronological, n - 1),
+                date_label(days, 0),
+                date_label(days, mid),
+                date_label(days, n - 1),
             ]);
             let y_axis = Axis::default().title(y_unit).bounds([0.0, y_max]).labels([
                 "0".to_string(),
@@ -804,7 +777,7 @@ mod tests {
     }
 
     #[test]
-    fn days_are_deduped_and_sorted_most_recent_first() {
+    fn days_are_deduped_and_sorted_chronologically() {
         let samples = vec![
             sample("2026-08-01", "10:00:00", vec![]),
             sample("2026-08-03", "10:00:00", vec![]),
@@ -812,7 +785,87 @@ mod tests {
             sample("2026-08-02", "10:00:00", vec![]),
         ];
         let app = App::new("host".to_string(), samples);
-        assert_eq!(app.days, vec!["2026-08-03", "2026-08-02", "2026-08-01"]);
+        assert_eq!(app.days, vec!["2026-08-01", "2026-08-02", "2026-08-03"]);
+    }
+
+    #[test]
+    fn app_starts_with_cursor_on_the_most_recent_day() {
+        let samples = vec![
+            sample("2026-08-01", "10:00:00", vec![]),
+            sample("2026-08-03", "10:00:00", vec![]),
+            sample("2026-08-02", "10:00:00", vec![]),
+        ];
+        let app = App::new("host".to_string(), samples);
+        match app.screen {
+            Screen::Metric(ref m) => assert_eq!(
+                m.day_cursor, 2,
+                "cursor should start on the last (most recent) day"
+            ),
+            _ => panic!("expected Screen::Metric"),
+        }
+    }
+
+    #[test]
+    fn day_cursor_moves_and_clamps_at_the_edges() {
+        let samples = vec![
+            sample("2026-08-01", "10:00:00", vec![]),
+            sample("2026-08-02", "10:00:00", vec![]),
+            sample("2026-08-03", "10:00:00", vec![]),
+        ];
+        let mut app = App::new("host".to_string(), samples);
+
+        fn cursor(app: &App) -> usize {
+            match app.screen {
+                Screen::Metric(ref m) => m.day_cursor,
+                _ => panic!("expected Screen::Metric"),
+            }
+        }
+
+        handle_key(&mut app, KeyCode::Left);
+        handle_key(&mut app, KeyCode::Left);
+        handle_key(&mut app, KeyCode::Left); // should clamp at 0, not go negative
+        assert_eq!(cursor(&app), 0);
+
+        handle_key(&mut app, KeyCode::Right);
+        handle_key(&mut app, KeyCode::Right);
+        handle_key(&mut app, KeyCode::Right); // should clamp at the last day
+        assert_eq!(cursor(&app), 2);
+    }
+
+    #[test]
+    fn enter_on_overview_drills_into_the_day_under_the_cursor() {
+        let samples = vec![
+            sample("2026-08-01", "10:00:00", vec![]),
+            sample("2026-08-02", "10:00:00", vec![]),
+        ];
+        let mut app = App::new("host".to_string(), samples);
+        handle_key(&mut app, KeyCode::Left); // cursor -> day 0 (2026-08-01)
+        handle_key(&mut app, KeyCode::Enter);
+        match app.screen {
+            Screen::Metric(ref m) => {
+                assert!(matches!(&m.scope, Scope::Day(d) if d == "2026-08-01"))
+            }
+            _ => panic!("expected Screen::Metric"),
+        }
+    }
+
+    #[test]
+    fn esc_from_day_view_returns_to_overview_at_that_day() {
+        let samples = vec![
+            sample("2026-08-01", "10:00:00", vec![]),
+            sample("2026-08-02", "10:00:00", vec![]),
+        ];
+        let mut app = App::new("host".to_string(), samples);
+        handle_key(&mut app, KeyCode::Left);
+        handle_key(&mut app, KeyCode::Enter);
+        handle_key(&mut app, KeyCode::Esc);
+        match app.screen {
+            Screen::Metric(ref m) => {
+                assert!(matches!(m.scope, Scope::All));
+                assert_eq!(m.day_cursor, 0);
+            }
+            _ => panic!("expected Screen::Metric"),
+        }
     }
 
     #[test]
@@ -853,6 +906,7 @@ mod tests {
             disk_idx: 0,
             net_ifaces: vec![],
             net_idx: 0,
+            day_cursor: 0,
         };
         cycle_metric_selection(&mut m, true);
         assert_eq!(m.disk_idx, 1);
@@ -873,6 +927,7 @@ mod tests {
             disk_idx: 0,
             net_ifaces: vec![],
             net_idx: 0,
+            day_cursor: 0,
         };
         cycle_metric_selection(&mut m, true);
         cycle_metric_selection(&mut m, false);
@@ -888,6 +943,7 @@ mod tests {
             disk_idx: 0,
             net_ifaces: vec![],
             net_idx: 0,
+            day_cursor: 0,
         };
         cycle_metric_selection(&mut m, true);
         assert_eq!(m.disk_idx, 0);

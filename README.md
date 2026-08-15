@@ -30,16 +30,16 @@ $ sysplot /var/log/sysstat/sa15    # a single file
 Navigation:
 
 1. **Overview** (the screen you land on) — CPU / Memory / Disk / Network,
-   one point per day across the whole loaded range, plotted as max/average/min
-   lines. `←`/`→` switches metric, `↑`/`↓` cycles the selected disk device /
-   network interface.
-2. **Days** — press `Enter` from the overview to list the last 30 days that
-   have data, most recent first.
-3. **Day view** — same CPU/Memory/Disk/Network controls, zoomed to a single
-   day's raw samples.
-4. **Hours** — press `Enter` from a day view to list the hours it has
-   samples for.
-5. **Hour view** — same controls again, zoomed to that hour's samples.
+   one point per day across the whole loaded range, plotted as High/Avg/Low
+   lines. `←`/`→` moves the day cursor (starts on the most recent day),
+   `Tab`/`Shift+Tab` switches metric, `↑`/`↓` cycles the selected disk
+   device / network interface, `Enter` opens the day under the cursor.
+2. **Day view** — same CPU/Memory/Disk/Network controls (`←`/`→` now
+   switches metric), zoomed to that day's raw samples. `Enter` lists the
+   hours it has samples for; `Esc` returns to the Overview with the cursor
+   right where you left it.
+3. **Hours** — pick an hour from the list.
+4. **Hour view** — same controls again, zoomed to that hour's samples.
 
 `Esc` goes back one level, `q` quits from anywhere.
 
