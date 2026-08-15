@@ -1,0 +1,19 @@
+[package]
+name = "sysplot"
+version = "0.1.0"
+authors = ["wabuntu <to.wabuntu@proton.me>"]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/wabuntu"
+repository = "https://github.com/wabuntu/sysplot"
+documentation = "https://docs.rs/sysplot"
+description = """
+TUI viewer for sysstat (.sar) files, powered by sadf.
+"""
+
+[dependencies]
+clap = { version = "4.6.6", features = ["derive"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+ratatui = "0.30.2"
+crossterm = "0.29.0"
