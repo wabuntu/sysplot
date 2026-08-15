@@ -7,6 +7,9 @@ Reads every sysstat data file in a directory (e.g. `/var/log/sysstat`) via
 memory, disk, and network activity — drill from a day down to a single hour
 without leaving the terminal.
 
+<img src="https://raw.githubusercontent.com/wabuntu/sysplot/main/docs/overview.png" alt="sysplot Overview screen: CPU/Memory/Disk/Network with max/average/min lines across the last 8 days" width="570">
+<img src="https://raw.githubusercontent.com/wabuntu/sysplot/main/docs/day.png" alt="sysplot day view: a single day's network throughput on a Wi-Fi interface" width="570">
+
 ## Install
 
 - Cargo: `cargo install sysplot`
