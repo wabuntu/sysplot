@@ -12,6 +12,8 @@ TUI viewer for sysstat (.sar) history, powered by sadf. Browse the last
 30 days of CPU, memory, disk, and network activity and drill from a day
 down to a single hour.
 """
+categories = ["command-line-utilities", "visualization"]
+keywords = ["sysstat", "sar", "tui", "monitoring", "cli"]
 
 [dependencies]
 clap = { version = "4.6.6", features = ["derive"] }
