@@ -1,7 +1,6 @@
 # sysplot
 
 [![Crates.io](https://img.shields.io/crates/v/sysplot.svg)](https://crates.io/crates/sysplot)
-[![docs.rs](https://img.shields.io/docsrs/sysplot)](https://docs.rs/sysplot)
 [![CI](https://github.com/wabuntu/sysplot/actions/workflows/rust.yml/badge.svg)](https://github.com/wabuntu/sysplot/actions/workflows/rust.yml)
 
 TUI viewer for sysstat (`.sar`) history, powered by `sadf`.
